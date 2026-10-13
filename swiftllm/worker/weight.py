@@ -202,10 +202,11 @@ def load_weights(
             with open(config_path, "r", encoding="utf-8") as f:
                 config_data = json.load(f)
                 
-            # In Llama 3.2, rope_scaling is a dictionary
-            # TODO 1: Add more robust detection logic
-            # TODO 2: Add more model versions
-            if "rope_scaling" in config_data and isinstance(config_data["rope_scaling"], dict):
+            # "llama3.2" means lm_head shares its weights with the token
+            # embeddings (e.g. Llama 3.2 1B/3B). Llama 3.1 8B also has a dict
+            # rope_scaling but stores a separate lm_head.weight, so decide from
+            # the checkpoint's own tie_word_embeddings flag.
+            if config_data.get("tie_word_embeddings", False):
                 model_version = "llama3.2"
             else:
                 model_version = "llama"

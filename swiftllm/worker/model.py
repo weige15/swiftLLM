@@ -179,39 +179,33 @@ class LlamaModel:
         base = self.model_config.rope_theta
         max_position_embeddings = self.model_config.max_position_embeddings
 
-        # Handle the case where rope_scaling is a dictionary (Llama 3.2)
+        # Handle the case where rope_scaling is a dictionary (Llama 3.1 / 3.2)
         if isinstance(rope_scaling, dict):
-            scaling_factor = rope_scaling.get('factor', 4.0)
-            low_freq_factor = rope_scaling.get('low_freq_factor', 1.0)
-            high_freq_factor = rope_scaling.get('high_freq_factor', 1.0)
-            rope_type = rope_scaling.get('rope_type', 'llama3')
-            original_max_position_embeddings = rope_scaling.get('original_max_position_embeddings', max_position_embeddings)
+            rope_type = rope_scaling.get('rope_type', rope_scaling.get('type', 'llama3'))
+            assert rope_type == 'llama3', f"Unsupported rope_type: {rope_type}"
+            scaling_factor = rope_scaling['factor']
+            low_freq_factor = rope_scaling['low_freq_factor']
+            high_freq_factor = rope_scaling['high_freq_factor']
+            original_max_position_embeddings = rope_scaling['original_max_position_embeddings']
 
-            # Calculate maximum sequence length based on scaling factor
-            max_seq_len = int(original_max_position_embeddings * scaling_factor)
-
-            # Generate position indices
+            # Same as HuggingFace Transformers' llama3 RoPE: positions are left
+            # untouched and the inverse frequencies are scaled instead. Long
+            # wavelengths are divided by scaling_factor, short ones are kept,
+            # and the band in between is smoothly interpolated.
             dim = self.model_config.head_dim
-            t = torch.arange(max_seq_len + 128, device="cuda", dtype=torch.float32)
+            inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, device="cuda", dtype=torch.float32) / dim))
+            wavelen = 2 * math.pi / inv_freq
+            low_freq_wavelen = original_max_position_embeddings / low_freq_factor
+            high_freq_wavelen = original_max_position_embeddings / high_freq_factor
 
-            # Create frequency array with dimensions split between low and high frequency parts
-            dim_half = dim // 2
-            split_point = int(dim_half * low_freq_factor / (low_freq_factor + high_freq_factor))
+            inv_freq_scaled = torch.where(wavelen > low_freq_wavelen, inv_freq / scaling_factor, inv_freq)
+            smooth_factor = (original_max_position_embeddings / wavelen - low_freq_factor) / (high_freq_factor - low_freq_factor)
+            smoothed_inv_freq = (1 - smooth_factor) * inv_freq_scaled / scaling_factor + smooth_factor * inv_freq_scaled
+            is_medium_freq = (wavelen >= high_freq_wavelen) & (wavelen <= low_freq_wavelen)
+            inv_freq = torch.where(is_medium_freq, smoothed_inv_freq, inv_freq_scaled)
 
-            # Apply different scaling factors to different parts of the frequency spectrum
-            inv_freq_low = 1.0 / (base ** (torch.arange(0, split_point * 2, 2, device="cuda", dtype=torch.float32) / dim))
-            inv_freq_high = 1.0 / (base ** (torch.arange(split_point * 2, dim, 2, device="cuda", dtype=torch.float32) / dim))
-
-            # Apply scaling factors
-            low_positions = t / low_freq_factor
-            high_positions = t / high_freq_factor
-
-            # Calculate frequencies for both parts
-            freqs_low = torch.outer(low_positions, inv_freq_low)
-            freqs_high = torch.outer(high_positions, inv_freq_high)
-
-            # Combine frequencies
-            freqs = torch.cat([freqs_low, freqs_high], dim=-1)
+            t = torch.arange(max_position_embeddings + 128, device="cuda", dtype=torch.float32)
+            freqs = torch.outer(t, inv_freq)
         else:
             # Original implementation for scalar rope_scaling
             rope_scaling_factor = rope_scaling
