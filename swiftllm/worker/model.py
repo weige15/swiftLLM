@@ -223,7 +223,8 @@ class LlamaModel:
         self,
         input_ids: torch.Tensor,    # [total_token_num]
         infer_state: LlamaInferState,
-    ) -> torch.Tensor:
+        return_token_scores: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Run a forward pass of the LlamaModel.
         """
@@ -239,8 +240,7 @@ class LlamaModel:
                 infer_state,
             )
         input_embds += residual_buf
-        output_tokens = self.post_layer.forward(input_embds, infer_state)
-        return output_tokens
+        return self.post_layer.forward(input_embds, infer_state, return_token_scores)
     
     @torch.inference_mode()
     def forward(
@@ -249,7 +249,8 @@ class LlamaModel:
         seq_ids_list: list[int],     # [batch_size]
         decoding_seq_lens_list: list[int], # [num_decoding_seqs]
         ignore_kvcache: bool = False,   # Skip actions related to kv cache, useful when profiling the number of kv blocks
-    ) -> list[int]:
+        return_token_scores: bool = False,  # Also return each output token's log-prob and its logit gap to the runner-up
+    ) -> list[int] | tuple[list[int], list[float], list[float]]:
         """
         Run a forward pass of the LlamaModel.
 
@@ -347,10 +348,15 @@ class LlamaModel:
             ignore_kvcache = ignore_kvcache
         )
 
-        return self._forward(
+        outputs = self._forward(
             torch.tensor(flattened_input_ids, dtype=torch.int32, device="cuda"),
-            infer_state
-        ).tolist()
+            infer_state,
+            return_token_scores
+        )
+        if return_token_scores:
+            output_tokens, log_probs, top2_gaps = outputs
+            return output_tokens.tolist(), log_probs.tolist(), top2_gaps.tolist()
+        return outputs.tolist()
 
     def _swap(
         self,

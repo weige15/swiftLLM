@@ -18,8 +18,9 @@ class LlamaPostLayer:
     def forward(
         self,
         input_embds: torch.Tensor,	# [num_total_tokens, hidden_size]
-        infer_state: LlamaInferState
-    ) -> torch.Tensor:
+        infer_state: LlamaInferState,
+        return_token_scores: bool = False
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # Slice to get the last token embedding for each request
         last_token_indices = torch.cat(
             (
@@ -37,5 +38,16 @@ class LlamaPostLayer:
         )
         logits = linear(last_input, self.weights.lm_head)    # [batch_size, vocab_size]
         output_tokens = torch.argmax(logits, dim=1)
-        return output_tokens
+        if not return_token_scores:
+            return output_tokens
+
+        # Scores of the chosen tokens, computed in float32 from the FP16 logits:
+        # - log_probs: log-probability of the chosen token
+        # - top2_gaps: logit of the chosen token minus logit of the runner-up
+        #   (0 means the choice was an exact tie, broken by argmax)
+        logits = logits.float()
+        log_probs = torch.log_softmax(logits, dim=1).gather(1, output_tokens[:, None]).squeeze(1)
+        top2 = torch.topk(logits, 2, dim=1).values
+        top2_gaps = top2[:, 0] - top2[:, 1]
+        return output_tokens, log_probs, top2_gaps
     
